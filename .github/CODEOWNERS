@@ -1,1 +1,247 @@
-* @streamlit/community-cloud
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>JetX Predictor — Web</title>
+<style>
+  :root{
+    --bg:#071126; --card:#0f1b2b; --accent:#00a86b; --danger:#e04f45; --gold:#f1c232;
+    --muted:#bfcbdc;
+  }
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto; margin:0; background:var(--bg); color:#fff; display:flex; align-items:flex-start; justify-content:center; padding:24px;}
+  .wrap{width:100%; max-width:420px;}
+  h1{color:#7ec7ff; text-align:center; margin:6px 0 18px; font-size:28px; letter-spacing:1px;}
+  .big-btn{display:block; width:100%; padding:18px 12px; border-radius:10px; text-align:center; font-weight:700; font-size:20px; margin-bottom:12px; box-shadow:0 6px 0 rgba(0,0,0,0.4);}
+  #status{background:#d9534f;}
+  #trend{background:var(--gold); color:#042024; margin-bottom:14px;}
+  .card{background:var(--card); padding:12px; border-radius:10px; margin-bottom:12px;}
+  input[type=text], textarea{width:100%; padding:12px; border-radius:8px; border:0; font-size:16px; margin-bottom:8px;}
+  .row{display:flex; gap:10px; margin-bottom:10px;}
+  button.btn{flex:1; padding:10px; border-radius:8px; border:0; font-weight:700; cursor:pointer; background:#5fb8ff; color:#012; box-shadow:0 4px 0 rgba(0,0,0,0.4);}
+  .history{display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;}
+  .chip{padding:8px 10px; border-radius:8px; font-weight:700; background:#2b6b48; color:#fff; min-width:80px; text-align:center;}
+  .chip.red{background:#9f413b;}
+  .chip.yellow{background:var(--gold); color:#042024;}
+  .result-box{margin-top:12px; text-align:center;}
+  .confidence{font-size:18px; margin-top:8px; color:var(--muted);}
+  .small{font-size:13px; color:var(--muted); margin-top:6px;}
+  footer{color:var(--muted); text-align:center; margin-top:18px; font-size:13px;}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>PREMIUM HYBRID JET X PREDICTOR</h1>
+
+    <div id="status" class="big-btn">STOP ⛔</div>
+    <div id="trend" class="big-btn">TREND —</div>
+
+    <div class="card">
+      <input id="singleInput" type="text" placeholder="Enter odd e.g. 3.25 or 1.50x" />
+      <div class="row">
+        <button id="addBtn" class="btn">ADD</button>
+        <button id="resetBtn" class="btn">RESET</button>
+      </div>
+
+      <textarea id="bulkInput" rows="2" placeholder="Bulk add (comma or newline separated)"></textarea>
+      <div class="row">
+        <button id="bulkAddBtn" class="btn">Bulk Add</button>
+        <button id="predictBtn" class="btn">Predict</button>
+      </div>
+
+      <div class="small">History (green ≥ 2× ; red &lt; 2×)</div>
+      <div id="history" class="history"></div>
+
+      <div class="result-box">
+        <div id="resultBtn" class="big-btn" style="background:#2b6b48; display:inline-block; width:100%;">—</div>
+        <div id="confidence" class="confidence"></div>
+      </div>
+    </div>
+
+    <footer>Saved locally on this device. Not financial advice — use responsibly.</footer>
+  </div>
+
+<script>
+/* ====== CONFIG - tweak these if you want ====== */
+const HISTORY_LENGTH = 12;     // last N rounds used for prediction
+const THRESHOLD = 2.0;         // the multiplier threshold you care about (2x)
+const BET_SCORE_CUTOFF = 0.55; // minimum score to recommend BET
+/* ============================================== */
+
+const singleInput = document.getElementById('singleInput');
+const addBtn = document.getElementById('addBtn');
+const resetBtn = document.getElementById('resetBtn');
+const bulkInput = document.getElementById('bulkInput');
+const bulkAddBtn = document.getElementById('bulkAddBtn');
+const predictBtn = document.getElementById('predictBtn');
+const historyDiv = document.getElementById('history');
+const statusDiv = document.getElementById('status');
+const trendDiv = document.getElementById('trend');
+const resultBtn = document.getElementById('resultBtn');
+const confidenceDiv = document.getElementById('confidence');
+
+let odds = loadOdds();
+
+function parseOdd(text){
+  if(!text) return null;
+  text = text.toString().trim().toLowerCase().replace('x','').replace('×','').trim();
+  const v = parseFloat(text);
+  return isNaN(v)?null: v;
+}
+
+function addOdd(value){
+  const val = parseOdd(value);
+  if(val === null) return false;
+  odds.push(Number(val));
+  saveOdds();
+  render();
+  return true;
+}
+
+function bulkAdd(text){
+  const parts = text.split(/[\n,;]+/).map(s=>s.trim()).filter(Boolean);
+  let added = 0;
+  for(const p of parts){
+    if(addOdd(p)) added++;
+  }
+  return added;
+}
+
+function saveOdds(){
+  try{ localStorage.setItem('jetx_odds_v1', JSON.stringify(odds)); } catch(e){ console.warn('save failed', e); }
+}
+function loadOdds(){
+  try{
+    const raw = localStorage.getItem('jetx_odds_v1');
+    if(!raw) return [];
+    return JSON.parse(raw).map(Number).filter(x=>!isNaN(x));
+  } catch(e){ return []; }
+}
+function resetOdds(){
+  odds = [];
+  saveOdds();
+  render();
+}
+
+function render(){
+  // history badges
+  historyDiv.innerHTML = '';
+  odds.slice().reverse().forEach((v,i)=>{
+    const el = document.createElement('div');
+    el.className = 'chip ' + (v >= THRESHOLD ? '' : 'red');
+    el.textContent = `${v.toFixed(2)}x`;
+    historyDiv.appendChild(el);
+  });
+
+  // trend: simple slope of last few rounds
+  const recent = odds.slice(-6);
+  if(recent.length >= 3){
+    const diffs = recent.slice(1).map((v,i)=>v - recent[i]);
+    const avgDiff = diffs.reduce((a,b)=>a+b,0)/diffs.length;
+    if(avgDiff > 0.08) trendDiv.textContent = 'TREND ↑';
+    else if(avgDiff < -0.08) trendDiv.textContent = 'TREND ↓';
+    else trendDiv.textContent = 'TREND —';
+  } else {
+    trendDiv.textContent = 'TREND —';
+  }
+
+  // default status
+  statusDiv.textContent = 'STOP ⛔';
+  statusDiv.style.background = '#d9534f';
+  resultBtn.textContent = '—';
+  resultBtn.style.background = '#2b6b48';
+  confidenceDiv.textContent = '';
+
+  // if enough data, show a prediction quickly
+  if(odds.length >= Math.min(3, HISTORY_LENGTH)){
+    const {score, confidence, decision} = predict();
+    showResult(score, confidence, decision);
+  }
+}
+
+function predict(){
+  // use last HISTORY_LENGTH values
+  const lastN = odds.slice(-HISTORY_LENGTH);
+  const N = Math.max(1, lastN.length);
+
+  const hits = lastN.filter(x=>x >= THRESHOLD).length;
+  const hitRate = hits / N;
+  const avg = lastN.reduce((a,b)=>a+b,0) / N;
+  const variance = lastN.reduce((a,b)=>a + Math.pow(b - avg,2), 0) / N;
+  const std = Math.sqrt(variance);
+
+  // low streak: consecutive below threshold at the end
+  let lowStreak = 0;
+  for(let i = lastN.length - 1; i >= 0; i--){
+    if(lastN[i] < THRESHOLD) lowStreak++; else break;
+  }
+  // last value
+  const last = lastN[lastN.length-1] ?? avg;
+
+  // Heuristic scoring (0..1)
+  let score = 0.5;
+  // more recent lows = higher score (simple 'reversion' tendency)
+  score += ((N - hits) / N - 0.5) * 0.3;         // between -0.15 .. +0.15
+  score += Math.min(0.45, lowStreak * 0.14);     // each low in streak increases score (capped)
+  // if last was high, reduce probability a bit
+  if(last >= THRESHOLD) score -= 0.22;
+  // more volatility (std) slightly increases chance of high spikes
+  score += Math.min(0.2, std / (THRESHOLD * 2) * 0.2);
+
+  // small bonus if average is far below threshold (suggesting many lows)
+  if(avg < THRESHOLD) score += Math.min(0.12, (THRESHOLD - avg) / THRESHOLD * 0.12);
+
+  // safety clamp
+  score = Math.max(0, Math.min(1, score));
+  const confidence = Math.round(score * 100);
+  const decision = score >= BET_SCORE_CUTOFF ? 'BET' : 'STOP';
+  return {score, confidence, decision, details:{N, hits, hitRate, avg, std, lowStreak, last}};
+}
+
+function showResult(score, confidence, decision){
+  if(decision === 'BET'){
+    statusDiv.textContent = 'BET ✅';
+    statusDiv.style.background = '#2b6b48';
+    resultBtn.textContent = 'BET ✅';
+    resultBtn.style.background = '#2b6b48';
+    confidenceDiv.textContent = `Confidence: ${confidence}%`;
+    // optional alert sound/vibrate (works on some mobile)
+    if(typeof navigator.vibrate === 'function') navigator.vibrate(120);
+  } else {
+    statusDiv.textContent = 'STOP ⛔';
+    statusDiv.style.background = '#d9534f';
+    resultBtn.textContent = 'STOP ⛔';
+    resultBtn.style.background = '#d9534f';
+    confidenceDiv.textContent = `Confidence: ${confidence}%`;
+  }
+}
+
+/* ===== event wiring ===== */
+addBtn.addEventListener('click', ()=>{
+  const v = singleInput.value;
+  if(!v){ alert('Type an odd (e.g., 1.50 or 2.75)'); return; }
+  const ok = addOdd(v);
+  if(!ok) alert('Could not parse value. Use numbers like 1.50 or 3.25x.');
+  singleInput.value = '';
+});
+bulkAddBtn.addEventListener('click', ()=>{
+  const text = bulkInput.value;
+  if(!text){ alert('Paste some odds separated by commas or new lines.'); return; }
+  const n = bulkAdd(text);
+  bulkInput.value = '';
+  if(n === 0) alert('No valid numbers found.');
+});
+resetBtn.addEventListener('click', ()=>{
+  if(confirm('Clear all saved odds?')) resetOdds();
+});
+predictBtn.addEventListener('click', ()=>{
+  if(odds.length === 0){ alert('Add some odds first.'); return; }
+  const {score, confidence, decision} = predict();
+  showResult(score, confidence, decision);
+});
+
+/* render initial */
+render();
+</script>
+</body>
+</html>
